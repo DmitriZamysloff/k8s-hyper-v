@@ -2,9 +2,6 @@
 set -e
 
 # set defaults
-default_hostname="$(hostname)"
-default_domain="netson.local"
-default_puppetmaster="foreman.netson.nl"
 tmp="/root/"
 
 clear
