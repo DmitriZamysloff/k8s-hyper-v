@@ -4,6 +4,25 @@ echo "|   K8S CLUSTER CREATOR FOR HYPER-V   |"
 echo "+-------------------------------------+"
 $SEED_FILE = "k8s-hyper-v.seed"
 $temDir = $env:temp    
+$MKISOFS_DIR_NAME = "MKISOFS_MD5_BIN"
+$HOSTNAME = "vubuntu"
+
+function Make-ISO ($WorkingDir, $ISOPrototypePath, $NewIsoPath) {
+    $ZIP_FILE_NAME = "$($MKISOFS_DIR_NAME).zip"
+    $ZIP_FILE = "$($WorkingDir)\$($ZIP_FILE_NAME)"
+
+    if (!(Test-Path ($ZIP_FILE))) {
+        Write-Host "Downloading Mkisofs"
+        wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/mkisofs-md5/mkisofs-md5-2.01-Binary.zip -OutFile "$($WorkingDir)\$($MKISOFS_DIR_NAME).zip"
+    } else {
+        Write-Host "Mkisofs archive found $($ZIP_FILE)"
+    }
+    Write-Host "Expanding Mkisofs archive $($ZIP_FILE)"
+    Expand-Archive $ZIP_FILE -DestinationPath "$($WorkingDir)\$($MKISOFS_DIR_NAME)" -Force -ErrorAction Stop
+    Start-Sleep -Seconds 5
+    Write-Host "Starting Mkisofs for creation of ISO file $($NewIsoPath)"
+    & "$($WorkingDir)\$($MKISOFS_DIR_NAME)\Binary\MinGW\Gcc-4.4.5\mkisofs.exe" -D -r -V "K8S_UBUNTU" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux\boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o $NewIsoPath $ISOPrototypePath
+}
 
 function New-TemporaryDirectory {
     $parent = [System.IO.Path]::GetTempPath()
@@ -38,9 +57,9 @@ function Get-Timezone-Online {
 }
 
 function Is-Yes-Response ([String] $Prompt) {
-    while ("yes","no" -notcontains ($answer = Read-Host -Prompt $Prompt)) {
+    while ("yes","no", "n", "y" -notcontains ($answer = Read-Host -Prompt $Prompt)) {
     }
-    if ("yes" -eq $answer) {
+    if ("yes" -eq $answer -or "y" -eq $answer) {
         return $true
     }
     return $false
@@ -54,12 +73,16 @@ function Download-Version ($DownloadLocation, $DownloadFile, $TargetFolder) {
 
 function Download-ISO ($DownloadLocation, $DownloadFile, $TargetFolder) {
     [String]$TargetIsoFile = "$($TargetFolder)\$($DownloadFile)"
-    [Boolean] $do_iso_download = ![System.IO.File]::Exists($TargetIsoFile)
-    if (!($do_iso_download)) {
+    [Boolean] $do_iso_download = !(Test-Path ($TargetIsoFile))
+    if (!$do_iso_download) {
         $do_iso_download = Is-Yes-Response "ISO File $($TargetIsoFile) already exists. Download again? [yes|no]"
     }
     if ($do_iso_download -eq $true) {
         Download-Version $DownloadLocation $DownloadFile $TargetFolder
+    }
+    if (!(Test-Path ($TargetIsoFile))) {
+        Write-Host "ERROR! Error downloading ISO file."
+        exit
     }
 }
 
@@ -78,19 +101,19 @@ function Get-Number-From-Input($Prompt) {
 
 
 function Remove-Dir-If-Exists ($Directory) {
-    if (Test-Path -Path $Directory) {
+    if (Test-Path $Directory) {
         Write-Host "Removing old directory $($Directory)"
-        Remove-Item -Recurse -Force $Directory
+        Remove-Item -Recurse -Force $Directory -ErrorAction Stop
     }
 }
 
 function Create-New-Dir ($Directory) {
     Remove-Dir-If-Exists $Directory
-    New-Item -ItemType "directory" $Directory
+    New-Item -ItemType "directory" $Directory -ErrorAction Stop
 }
 
 function Insert-Before ($FILE_PATH, $PATTERN, [String] $TO_INSERT) {
-    Write-Host "Tracing file $($FILE_PATH) for suitable positions"
+    #Write-Host "Tracing file $($FILE_PATH) for suitable positions"
     [System.Collections.ArrayList]$file = Get-Content $FILE_PATH
     $insert = @()
 
@@ -98,7 +121,7 @@ function Insert-Before ($FILE_PATH, $PATTERN, [String] $TO_INSERT) {
         if ($file[$i] -match $PATTERN) {
             $position = $i#$i-1
             $insert += $position #Recording the position
-            Write-Host "String at position $($i) ->[$($file[$i])]<- matched. Position $($position) added"
+            #Write-Host "String at position $($i) ->[$($file[$i])]<- matched. Position $($position) added"
         }
     }
     $insert | ForEach-Object { $file.insert($_, $TO_INSERT) }
@@ -124,38 +147,49 @@ function Hash-PWD ([String] $PWD) {
     return ($HTML.ParsedHtml.getElementsByTagName("input") | Where { $_.type -eq "text" -and $_.readOnly -eq $true}).value
 }
 
+function Hash-File ($File) {
+}
+
 function Make-RW ([String] $FILE) {
     attrib -r $FILE
 }
 
-function Do-Remaster ($WORK_FOLDER, $ISO_IMAGE_PATH, $NEW_ISO_FILE, [String] $SEED_FILE_NAME, $SEED_FILE_PATH, [String] $USER_NAME, [String] $PASSWORD, [String] $TIME_ZONE) {
+function Do-Remaster ($WORK_FOLDER, $ISO_IMAGE_PATH, $NEW_ISO_FILE, $NewIsoName, [String] $SEED_FILE_NAME, $SEED_FILE_PATH, [String] $USER_NAME, [String] $PASSWORD, [String] $TIME_ZONE, [String] $hostname) {
     
     $workFolder = "$($WORK_FOLDER)\iso_org"
     Write-Host "Remastering ISO File in $($workFolder)"
     
     Create-New-Dir $workFolder
-    if (Test-Path -Path $NEW_ISO_FILE) {
+    
+    if (Test-Path ($NEW_ISO_FILE)) {
         Write-Host "Removing old remastered image $($NEW_ISO_FILE)"
         Remove-Item -Path $NEW_ISO_FILE
     }
     Write-Host "Mounting Disk Image $($ISO_IMAGE_PATH)"
-    $mountResult = Mount-DiskImage -ImagePath $ISO_IMAGE_PATH -Access ReadOnly -PassThru 
+    $mountResult = Mount-DiskImage -ImagePath $ISO_IMAGE_PATH -Access ReadOnly -PassThru -ErrorAction Stop
     $mountLetter = ($mountResult|Get-Volume).DriveLetter
+    Write-Host "Awaiting proper mount"
+    Start-Sleep -Seconds 5
     Write-Host "Disk Image $($ISO_IMAGE_PATH) is mounted to $($mountLetter)"
     try {
         Write-Host "Copying ISO content $($mountLetter):\* to $($workFolder)"
-        Copy-Item "$($mountLetter):\*" -Destination $workFolder -Recurse | Out-Null
+        Copy-Item "$($mountLetter):\*" -Destination $workFolder -Recurse -Force -ErrorAction Stop | Out-Null
     } finally {
         Write-Host "Dismounting Image"
         Dismount-DiskImage -ImagePath $ISO_IMAGE_PATH
     }
-    #set language
+    Write-Host "Awaiting dismounting"
+    Start-Sleep -Seconds 5
+    Write-Host "Setting 'Normal' attributes for extracted files."
+    Get-ChildItem $workFolder -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {!$_.PSIsContainer} | foreach {$_.Attributes = "Normal"} -ErrorAction Stop
+
     Write-Host "Setting new installation language to 'en'"
-    Make-RW "$($workFolder)\isolinux\lang"
-    Echo "en" | Out-File $workFolder\isolinux\lang
+
+    Set-Content -Path $workFolder\isolinux\lang -Value "en'n" -ErrorAction Stop
+
     Write-Host "Setting timeout in $($workFolder)/isolinux/isolinux.cfg to 1"
-    Make-RW "$($workFolder)\isolinux\isolinux.cfg"
-    (Get-Content $workFolder\isolinux\isolinux.cfg) -replace "^timeout\s+([0-9]+)$","timeout 1" | Out-File $workFolder\isolinux\isolinux.cfg
+
+    (Get-Content $workFolder\isolinux\isolinux.cfg) -replace "^timeout\s+([0-9]+)$","timeout 1" | Out-File $workFolder\isolinux\isolinux.cfg -ErrorAction Stop
     
     $lateCommand = "chroot /target curl -L /home/$($USER_NAME)/start.sh https://raw.githubusercontent.com/DmitriZamysloff/k8s-hyper-v/master/start.sh ; chroot /target chmod +x /home/$($USER_NAME)/start.sh ;"
     
@@ -164,14 +198,14 @@ function Do-Remaster ($WORK_FOLDER, $ISO_IMAGE_PATH, $NEW_ISO_FILE, [String] $SE
     Write-Host "Setting up firstrun script"
     Echo "d-i preseed/late_command                              string $($lateCommand)" >> $workFolder\preseed\$SEED_FILE_NAME
     [String] $PASSWORD_HASH = Hash-PWD $PASSWORD
-    (Get-Content $workFolder\preseed\$SEED_FILE_NAME) -replace "{{username}}","$($USER_NAME)" -replace "{{pwhash}}", $PASSWORD_HASH -replace "{{hostname}}","vubuntu" -replace "{{timezone}}",$TIME_ZONE | Out-File $workFolder\preseed\$SEED_FILE_NAME
+    (Get-Content $workFolder\preseed\$SEED_FILE_NAME) -replace "{{username}}","$($USER_NAME)" -replace "{{pwhash}}", $PASSWORD_HASH -replace "{{hostname}}", $hostname -replace "{{timezone}}",$TIME_ZONE | Out-File $workFolder\preseed\$SEED_FILE_NAME -ErrorAction Stop
 
     $SEED_CHECKSUM = Get-FileHash $workFolder\preseed\$SEED_FILE_NAME -Algorithm MD5
     $SEED_HASH = $SEED_CHECKSUM.Hash.toLower()
-    Make-RW "$($workFolder)\isolinux\txt.cfg"
+
     Insert-Before $workFolder\isolinux\txt.cfg "^label install$" "label autoinstall`n  menu label ^Autoinstall V-K8S Ubuntu Server`n  kernel /install/vmlinuz`n  append file=/cdrom/preseed/ubuntu-server.seed initrd=/install/initrd.gz auto=true priority=high preseed/file=/cdrom/preseed/$($SEED_FILE_NAME) preseed/file/checksum=$($SEED_HASH)  /home/$($USER_NAME)/iso_new/preseed/$($SEED_FILE_NAME) --"
 
-
+    Make-ISO $WORK_FOLDER $workFolder $ISO_IMAGE_PATH
 }
 
 
@@ -179,7 +213,7 @@ function Do-Remaster ($WORK_FOLDER, $ISO_IMAGE_PATH, $NEW_ISO_FILE, [String] $SE
 $bL,$bV = Get-BionicLinkAndVersion
 $DOWNLOAD_FILE = "ubuntu-$($bV)-server-amd64.iso"
 $DOWNLOAD_LOCATION = "http://cdimage.ubuntu.com/releases/$($bL)release"
-$NEW_ISO_NAME = "ubuntu-$($bV)-server-amd64-unattended.iso"
+$NEW_ISO_NAME = "ubuntu-$($bV)-server-amd64-k8s.iso"
 
 if (($userName = Read-Host -Prompt "Please Input Preferred User Name [bionic]") -eq '') {$username = "bionic"} 
 if (($password = Read-Host -Prompt "Please Enter Preferred Password for User $($userName) [bionic]") -eq '') {$password = "bionic"}
@@ -203,16 +237,10 @@ $SEED_FILE_PATH = "$($temDir)\$($SEED_FILE)"
 
 Download-ISO $DOWNLOAD_LOCATION $DOWNLOAD_FILE $temDir
 
-if (![System.IO.File]::Exists($ISO_FILE)) {
-    Write-Host "Error downloading file"
-    return
-}
-
-
 Write-Host "Downloading $($SEED_FILE)"
 wget "https://raw.githubusercontent.com/DmitriZamysloff/k8s-hyper-v/master/$($SEED_FILE)" -OutFile $SEED_FILE_PATH
 
-[Boolean] $do_remaster = ![System.IO.File]::Exists($NEW_ISO_FILE)
+[Boolean] $do_remaster = ! (Test-Path ($NEW_ISO_FILE))
 
 if (!($do_remaster)) {
     $do_remaster = Is-Yes-Response "Remastered File $($NEW_ISO_FILE) already exists. Do remastering again? [yes|no]"
@@ -220,8 +248,15 @@ if (!($do_remaster)) {
     Write-Host "No remastered file found."
 }
 if ($do_remaster) {
-    Do-Remaster $temDir $ISO_FILE $NEW_ISO_FILE $SEED_FILE $SEED_FILE_PATH $userName $password $TIMEZONE
+    Do-Remaster $temDir $ISO_FILE $NEW_ISO_FILE $NEW_ISO_NAME $SEED_FILE $SEED_FILE_PATH $userName $password $TIMEZONE $HOSTNAME
+    
+}
+Start-Sleep -Seconds 5
+if (!(Test-Path ($NEW_ISO_FILE))) {
+    Write-Host "ERROR! No ISO file $($NEW_ISO_FILE) created. Existing!" 
+    return
 }
 
+Write-Host "--------\n finished remastering k8s ubuntu iso file\n the new file is located at: $($NEW_ISO_FILE)\n your user name is: $($userName)\n your password is: $($password)\n your hostname is: $($HOSTNAME)\n your timezone is: $($TIMEZONE)\n"
 
 
